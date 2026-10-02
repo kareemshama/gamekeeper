@@ -10,6 +10,8 @@ import {
   onSyncProgress,
   cancelSync,
   getHltbCache,
+  getCouchProfiles,
+  isCouchReady,
   fetchHltbData,
   onHltbComplete,
   onTasteReady,
@@ -18,6 +20,9 @@ import {
   Classification,
   CategoryKey,
   ConfigStatus,
+  CouchFilter,
+  CouchProfile,
+  DEFAULT_COUCH_FILTER,
   HltbEntry,
   OwnedGame,
   SyncProgress as SyncProgressEvent,
@@ -35,6 +40,17 @@ import SettingsPanel from "./components/SettingsPanel";
 import ChatPanel from "./components/ChatPanel";
 
 type AppPhase = "loading" | "setup" | "syncing" | "ready";
+
+const COUCH_FILTER_KEY = "gamekeeper-couch-filter";
+
+function loadCouchFilter(): CouchFilter {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COUCH_FILTER_KEY) || "{}");
+    return { ...DEFAULT_COUCH_FILTER, ...saved };
+  } catch {
+    return DEFAULT_COUCH_FILTER;
+  }
+}
 
 interface SyncState {
   step: string;
@@ -72,12 +88,24 @@ export default function App() {
   const [hltbFetching, setHltbFetching] = useState(false);
   const [hltbProgress, setHltbProgress] = useState<{ current: number; total: number } | null>(null);
   const [playtimeMap, setPlaytimeMap] = useState<Record<string, number>>({});
+  const [couchProfiles, setCouchProfiles] = useState<Record<string, CouchProfile>>({});
+  const [couchFilter, setCouchFilter] = useState<CouchFilter>(loadCouchFilter);
   const [view, setView] = useState<AppView>("library");
   const [tasteSetup, setTasteSetup] = useState<TasteSetupStatus | null>(null);
   const [tasteProfile, setTasteProfile] = useState<TasteProfile | null>(null);
   const [tasteError, setTasteError] = useState<string | null>(null);
 
   const tasteRetries = useRef(0);
+
+  // Persist the couch filter so a TV setup stays set up between launches
+  useEffect(() => {
+    localStorage.setItem(COUCH_FILTER_KEY, JSON.stringify(couchFilter));
+  }, [couchFilter]);
+
+  /** Couch profiles come from cached store data — cheap, offline, no network. */
+  function refreshCouchProfiles() {
+    getCouchProfiles().then(setCouchProfiles).catch(() => {});
+  }
 
   async function refreshTasteProfile(force?: boolean) {
     try {
@@ -193,6 +221,7 @@ export default function App() {
       if (existing.length > 0) {
         setClassifications(existing);
         setPhase("ready");
+        refreshCouchProfiles();
         // Cold start: hydrate playtime from the cached library (disk only, never network)
         getCachedLibrary()
           .then((games) => {
@@ -228,6 +257,7 @@ export default function App() {
       setClassifications(results);
 
       setPhase("ready");
+      refreshCouchProfiles();
 
       // Fresh sync data (incl. last-played times) → recompute taste profile
       refreshTasteProfile(true);
@@ -269,6 +299,7 @@ export default function App() {
       setClassifications(results);
 
       setPhase("ready");
+      refreshCouchProfiles();
 
       // Start HLTB background fetch after resync
       setHltbFetching(true);
@@ -288,10 +319,25 @@ export default function App() {
     await cancelSync();
   }
 
-  const filteredGames =
+  /** Couch-ready under the current sub-options, ignoring the on/off switch. */
+  function isCouchPick(appid: number): boolean {
+    const profile = couchProfiles[String(appid)];
+    if (!isCouchReady(profile, couchFilter.includePartial)) return false;
+    if (couchFilter.splitScreenOnly && !profile.splitScreen) return false;
+    return true;
+  }
+
+  const inCategory =
     activeCategory === "ALL"
       ? classifications
       : classifications.filter((c) => c.category === activeCategory);
+
+  const filteredGames = couchFilter.on
+    ? inCategory.filter((c) => isCouchPick(c.appid))
+    : inCategory;
+
+  // Shown next to the sidebar toggle, so the number is useful before switching on
+  const couchCount = inCategory.filter((c) => isCouchPick(c.appid)).length;
 
   const counts = {
     ALL: classifications.length,
@@ -380,6 +426,9 @@ export default function App() {
           activeCategory={activeCategory}
           onCategoryChange={setActiveCategory}
           counts={counts}
+          couchOn={couchFilter.on}
+          onCouchToggle={() => setCouchFilter((f) => ({ ...f, on: !f.on }))}
+          couchCount={couchCount}
           onResync={handleResync}
           onWriteToSteam={() => setShowWriteToSteam(true)}
           onSettings={() => setShowSettings(true)}
@@ -393,9 +442,13 @@ export default function App() {
               hltbFetching={hltbFetching}
               hltbProgress={hltbProgress}
               playtimeMap={playtimeMap}
+              couchProfiles={couchProfiles}
+              couchFilter={couchFilter}
+              onCouchFilterChange={setCouchFilter}
               onOverrideChange={async () => {
                 const results = await classifyGames();
                 setClassifications(results);
+                refreshCouchProfiles();
                 // Category overrides change taste weights — recompute
                 refreshTasteProfile(true);
               }}
@@ -422,6 +475,16 @@ export default function App() {
         <WriteToSteam
           onClose={() => setShowWriteToSteam(false)}
           totalGames={classifications.length}
+          couchCount={
+            classifications.filter(
+              (c) => c.category !== "NOT_A_GAME" && isCouchReady(couchProfiles[String(c.appid)], false)
+            ).length
+          }
+          couchCountWithPartial={
+            classifications.filter(
+              (c) => c.category !== "NOT_A_GAME" && isCouchReady(couchProfiles[String(c.appid)], true)
+            ).length
+          }
         />
       )}
       {showSettings && (

@@ -12,14 +12,18 @@ import {
   AmbiguityResponse,
   SimilarGame,
   TasteFit,
+  CouchProfile,
+  CONTROLLER_LABELS,
   getSimilarGames,
   getGameTasteFit,
 } from "../lib/commands";
 import { open } from "@tauri-apps/plugin-shell";
+import { GamepadIcon } from "./icons";
 
 interface Props {
   game: Classification;
   hltb?: HltbEntry;
+  couch?: CouchProfile;
   playtimeHours?: number;
   onClose: () => void;
   onOverride: (appid: number, category: CategoryKey) => void;
@@ -32,7 +36,7 @@ const CATEGORIES: CategoryKey[] = [
   "NOT_A_GAME",
 ];
 
-export default function GameDetail({ game, hltb, playtimeHours = 0, onClose, onOverride }: Props) {
+export default function GameDetail({ game, hltb, couch, playtimeHours = 0, onClose, onOverride }: Props) {
   const [aiSuggestion, setAiSuggestion] = useState<AmbiguityResponse | null>(
     null
   );
@@ -105,6 +109,38 @@ export default function GameDetail({ game, hltb, playtimeHours = 0, onClose, onO
               {game.confidence}
             </span>
           </div>
+
+          {/* Couch & TV readiness */}
+          {couch && couch.controller !== "unknown" && (
+            <div className="mb-4 p-3 rounded-lg bg-steam-bg">
+              <div className="flex items-center gap-2">
+                <GamepadIcon
+                  size={13}
+                  className={couch.tvReady ? "text-steam-blue" : "text-steam-text-dim"}
+                />
+                <span className="text-xs font-semibold text-white">
+                  {CONTROLLER_LABELS[couch.controller]}
+                </span>
+              </div>
+              {(couch.splitScreen || couch.remotePlayTv || couch.remotePlayTogether || couch.vrOnly) && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {couch.splitScreen && <CouchChip label="Split screen" />}
+                  {couch.remotePlayTv && <CouchChip label="Remote Play on TV" />}
+                  {couch.remotePlayTogether && <CouchChip label="Remote Play Together" />}
+                  {couch.vrOnly && <CouchChip label="VR only" />}
+                </div>
+              )}
+              <div className="mt-2 text-[10px] text-steam-text-dim">
+                {couch.vrOnly
+                  ? "Needs a VR headset, so it never lands in the Couch / TV list."
+                  : couch.controller === "full"
+                  ? "Menus included — playable start to finish on a gamepad."
+                  : couch.controller === "partial"
+                  ? "Gamepad works in-game, but expect to reach for a keyboard."
+                  : "Steam lists no gamepad support for this one."}
+              </div>
+            </div>
+          )}
 
           {/* HLTB completion times */}
           {hltb && hltb.match_status === "matched" && hltb.main_story_hours != null && (
@@ -322,5 +358,13 @@ export default function GameDetail({ game, hltb, playtimeHours = 0, onClose, onO
         </div>
       </div>
     </div>
+  );
+}
+
+function CouchChip({ label }: { label: string }) {
+  return (
+    <span className="px-1.5 py-0.5 rounded bg-steam-surface-light text-[10px] text-steam-text">
+      {label}
+    </span>
   );
 }
