@@ -1,4 +1,5 @@
 import { CategoryKey, CATEGORY_LABELS, CATEGORY_COLORS } from "../lib/commands";
+import { GamepadIcon } from "./icons";
 
 type FilterKey = CategoryKey | "ALL";
 
@@ -10,6 +11,10 @@ interface Props {
   activeCategory: FilterKey;
   onCategoryChange: (cat: FilterKey) => void;
   counts: Record<FilterKey, number>;
+  /** Couch / TV filter — layers on top of the selected collection. */
+  couchOn: boolean;
+  onCouchToggle: () => void;
+  couchCount: number;
   onResync: () => void;
   onWriteToSteam: () => void;
   onSettings: () => void;
@@ -30,7 +35,7 @@ const FILTERS: { key: FilterKey; label: string; color?: string }[] = [
   { key: "NOT_A_GAME", label: "Not a Game", color: CATEGORY_COLORS.NOT_A_GAME },
 ];
 
-export default function Sidebar({ activeView, onViewChange, activeCategory, onCategoryChange, counts, onResync, onWriteToSteam, onSettings, onChat }: Props) {
+export default function Sidebar({ activeView, onViewChange, activeCategory, onCategoryChange, counts, couchOn, onCouchToggle, couchCount, onResync, onWriteToSteam, onSettings, onChat }: Props) {
   return (
     <aside className="w-56 bg-steam-surface flex flex-col border-r border-steam-border shrink-0">
       <nav className="p-2 space-y-1 border-b border-steam-border">
@@ -89,6 +94,31 @@ export default function Sidebar({ activeView, onViewChange, activeCategory, onCa
                   </button>
                 );
               })}
+            </nav>
+
+            <div className="p-4 pb-2">
+              <h2 className="text-xs font-semibold text-steam-text-dim tracking-wide uppercase">
+                Play style
+              </h2>
+            </div>
+            <nav className="p-2 pt-0 space-y-1">
+              <button
+                onClick={onCouchToggle}
+                role="switch"
+                aria-checked={couchOn}
+                title="Gamepad-friendly games for a TV setup — layers on top of the collection above"
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors ${
+                  couchOn
+                    ? "bg-steam-blue/15 text-white border border-steam-blue/40"
+                    : "text-steam-text-dim hover:text-white hover:bg-steam-surface-light/50 border border-transparent"
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <GamepadIcon className={couchOn ? "text-steam-blue" : ""} />
+                  Couch / TV
+                </span>
+                <span className="text-xs text-steam-text-dim">{couchCount}</span>
+              </button>
             </nav>
           </>
         )}

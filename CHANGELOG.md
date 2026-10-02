@@ -2,6 +2,19 @@
 
 All notable changes to Gamekeeper will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Write mode for Steam collections**: choose **Add new games only** (default) or **Replace with Gamekeeper's sorting**. Add-new never removes a game and files a title only when none of the four managed collections already holds it, so hand-sorted collections survive a write. Replace is the old behavior and is now opt-in
+- **Couch / TV filter**: a "Play style" toggle in the sidebar (and next to the search bar) that narrows the library to gamepad-friendly games, with options for partial controller support and split-screen only. Derived from Steam's own store categories, so it needs no extra fetch and works offline
+- **Controller badges** on game cards, plus a "Couch & TV" panel in game details showing controller support, split screen, Remote Play on TV, and Remote Play Together
+- **Optional "Controller Friendly" Steam collection**: opt in when writing to Steam and your gamepad-ready games show up as their own collection in Big Picture mode on the TV. VR-only titles and non-games are excluded
+- "Write to Steam" now shows a confirmation step listing what it will write, instead of writing immediately when only one Steam account exists. The success screen reports the collection names and game counts the backend actually wrote, rather than restating what the UI asked for
+
+### Changed
+- **Steam collections lost the `SBO:` prefix.** Gamekeeper now writes `Completed`, `In Progress`, `Endless/Multiplayer`, `Not a Game`, and `Controller Friendly`, updating collections with those names in place instead of creating a duplicate prefixed set beside them. Leftover `SBO:` collections are deleted on the next write. Collections named anything else are never touched
+- Newly created collections carry the same conflict-resolution fields Steam stamps on its own user collections
+
 ## [4.0.0] - 2026-09-01
 
 The Taste Engine release. Gamekeeper now knows your taste — fully offline, no GPU, no model download required.

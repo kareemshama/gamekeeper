@@ -4,23 +4,80 @@ import {
   getSteamAccounts,
   writeToSteam,
   SteamAccount,
+  WriteMode,
+  WriteReport,
 } from "../lib/commands";
+
+const COUCH_WRITE_KEY = "gamekeeper-write-couch";
+const WRITE_MODE_KEY = "gamekeeper-write-mode";
+
+/** Non-destructive by default — hand-sorted collections outrank inference. */
+function loadWriteMode(): WriteMode {
+  return localStorage.getItem(WRITE_MODE_KEY) === "replace" ? "replace" : "addNew";
+}
 
 interface Props {
   onClose: () => void;
   totalGames: number;
+  /** Games with full controller support (excluding Not a Game). */
+  couchCount: number;
+  /** Same, counting partial controller support too. */
+  couchCountWithPartial: number;
 }
 
-type WritePhase = "checking" | "steam-running" | "select-account" | "writing" | "done" | "error";
+type WritePhase =
+  | "checking"
+  | "steam-running"
+  | "select-account"
+  | "confirm"
+  | "writing"
+  | "done"
+  | "error";
 
-export default function WriteToSteam({ onClose, totalGames }: Props) {
+interface CouchPref {
+  include: boolean;
+  includePartial: boolean;
+}
+
+/** Defaults to on for a first write — this collection is the reason the
+ *  feature exists, and an unticked box is easy to miss. The user's choice is
+ *  remembered from then on. */
+function loadCouchPref(): CouchPref {
+  try {
+    const saved = JSON.parse(localStorage.getItem(COUCH_WRITE_KEY) || "{}");
+    return { include: saved.include ?? true, includePartial: saved.includePartial ?? false };
+  } catch {
+    return { include: true, includePartial: false };
+  }
+}
+
+export default function WriteToSteam({
+  onClose,
+  totalGames,
+  couchCount,
+  couchCountWithPartial,
+}: Props) {
   const [phase, setPhase] = useState<WritePhase>("checking");
   const [accounts, setAccounts] = useState<SteamAccount[]>([]);
+  const [accountPath, setAccountPath] = useState<string | null>(null);
+  const [couchPref, setCouchPref] = useState<CouchPref>(loadCouchPref);
+  const [report, setReport] = useState<WriteReport | null>(null);
+  const [mode, setMode] = useState<WriteMode>(loadWriteMode);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     checkStatus();
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(COUCH_WRITE_KEY, JSON.stringify(couchPref));
+  }, [couchPref]);
+
+  useEffect(() => {
+    localStorage.setItem(WRITE_MODE_KEY, mode);
+  }, [mode]);
+
+  const couchTotal = couchPref.includePartial ? couchCountWithPartial : couchCount;
 
   async function checkStatus() {
     try {
@@ -37,8 +94,8 @@ export default function WriteToSteam({ onClose, totalGames }: Props) {
         setError("No Steam userdata directory found. Is Steam installed?");
         setPhase("error");
       } else if (accts.length === 1) {
-        // Auto-select single account
-        await doWrite(accts[0].path);
+        setAccountPath(accts[0].path);
+        setPhase("confirm");
       } else {
         setPhase("select-account");
       }
@@ -48,10 +105,20 @@ export default function WriteToSteam({ onClose, totalGames }: Props) {
     }
   }
 
-  async function doWrite(accountPath: string) {
+  async function doWrite() {
+    if (!accountPath) {
+      setError("No Steam account selected.");
+      setPhase("error");
+      return;
+    }
     setPhase("writing");
     try {
-      await writeToSteam(accountPath);
+      const result = await writeToSteam(accountPath, {
+        includeCouch: couchPref.include,
+        couchIncludePartial: couchPref.includePartial,
+        mode,
+      });
+      setReport(result);
       setPhase("done");
     } catch (e) {
       setError(String(e));
@@ -124,7 +191,10 @@ export default function WriteToSteam({ onClose, totalGames }: Props) {
             {accounts.map((acct) => (
               <button
                 key={acct.id}
-                onClick={() => doWrite(acct.path)}
+                onClick={() => {
+                  setAccountPath(acct.path);
+                  setPhase("confirm");
+                }}
                 className="w-full py-3 px-4 rounded-lg bg-steam-surface-light text-white text-left hover:bg-steam-blue/20 transition-colors border border-steam-border"
               >
                 Account: {acct.id}
@@ -136,6 +206,116 @@ export default function WriteToSteam({ onClose, totalGames }: Props) {
             >
               Cancel
             </button>
+          </div>
+        )}
+
+        {phase === "confirm" && (
+          <div className="space-y-4">
+            <div className="text-sm text-steam-text-dim">
+              {totalGames} games into four Steam collections:{" "}
+              <span className="text-steam-text">Completed</span>,{" "}
+              <span className="text-steam-text">In Progress</span>,{" "}
+              <span className="text-steam-text">Endless/Multiplayer</span>, and{" "}
+              <span className="text-steam-text">Not a Game</span>.
+            </div>
+
+            <div className="space-y-2">
+              {(
+                [
+                  {
+                    key: "addNew" as WriteMode,
+                    title: "Add new games only",
+                    detail:
+                      "Nothing is removed. A game is filed only if none of the four collections already has it, so your own sorting survives.",
+                  },
+                  {
+                    key: "replace" as WriteMode,
+                    title: "Replace with Gamekeeper's sorting",
+                    detail:
+                      "Each of the four collections becomes exactly what Gamekeeper computed. Manual sorting in them is lost.",
+                  },
+                ]
+              ).map((opt) => (
+                <label
+                  key={opt.key}
+                  className={`flex items-start gap-2 p-2.5 rounded-lg cursor-pointer border transition-colors ${
+                    mode === opt.key
+                      ? "bg-steam-blue/10 border-steam-blue/40"
+                      : "bg-steam-bg border-steam-border hover:border-steam-text-dim"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="write-mode"
+                    checked={mode === opt.key}
+                    onChange={() => setMode(opt.key)}
+                    className="mt-0.5 accent-steam-blue"
+                  />
+                  <span>
+                    <span className="text-sm text-white">{opt.title}</span>
+                    <span className="block text-xs text-steam-text-dim mt-0.5">
+                      {opt.detail}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            <div className="text-xs text-steam-text-dim">
+              Collections named anything else are never touched. Leftover{" "}
+              <span className="text-steam-text">SBO:</span> collections from older
+              versions are removed either way.
+            </div>
+
+            <div className="p-3 rounded-lg bg-steam-bg space-y-2">
+              <label className="flex items-start gap-2 text-sm text-steam-text cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={couchPref.include}
+                  onChange={(e) =>
+                    setCouchPref({ ...couchPref, include: e.target.checked })
+                  }
+                  className="mt-0.5 accent-steam-blue"
+                />
+                <span>
+                  Also write{" "}
+                  <span className="text-white font-medium">Controller Friendly</span>
+                  <span className="block text-xs text-steam-text-dim mt-0.5">
+                    {couchTotal} gamepad-ready games — handy in Big Picture mode on a TV.
+                    {mode === "addNew" && " Added to whatever the collection already holds."}
+                  </span>
+                </span>
+              </label>
+
+              {couchPref.include && (
+                <label className="flex items-center gap-2 pl-6 text-xs text-steam-text-dim cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={couchPref.includePartial}
+                    onChange={(e) =>
+                      setCouchPref({ ...couchPref, includePartial: e.target.checked })
+                    }
+                    className="accent-steam-blue"
+                  />
+                  Include partial controller support
+                </label>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={doWrite}
+                className="flex-1 py-2 rounded-lg bg-steam-blue text-white font-medium hover:bg-steam-blue-hover transition-colors"
+              >
+                Write collections
+              </button>
+              <button
+                onClick={onClose}
+                className="flex-1 py-2 rounded-lg bg-steam-surface-light text-steam-text-dim hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         )}
 
@@ -157,7 +337,25 @@ export default function WriteToSteam({ onClose, totalGames }: Props) {
               </div>
             </div>
             <div className="text-xs text-steam-text-dim">
-              Created/updated: SBO: Completed, SBO: In Progress, SBO: Endless, SBO: Not a Game
+              <div className="mb-1">Created/updated:</div>
+              <ul className="space-y-0.5">
+                {(report?.collections ?? []).map(([name, count]) => (
+                  <li key={name} className="flex items-center justify-between gap-3">
+                    <span className="text-steam-text">{name}</span>
+                    <span>{count} game{count !== 1 ? "s" : ""}</span>
+                  </li>
+                ))}
+              </ul>
+              {(report?.removed?.length ?? 0) > 0 && (
+                <div className="mt-2">
+                  <div className="mb-1">Removed (renamed in this version):</div>
+                  <ul className="space-y-0.5">
+                    {report!.removed.map((name) => (
+                      <li key={name}>{name}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
             <button
               onClick={onClose}

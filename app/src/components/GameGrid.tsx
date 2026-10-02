@@ -5,10 +5,13 @@ import {
   CATEGORY_LABELS,
   CATEGORY_COLORS,
   STEAM_HEADER_URL,
+  CouchFilter,
+  CouchProfile,
   HltbEntry,
   setOverride,
 } from "../lib/commands";
 import GameDetail from "./GameDetail";
+import { GamepadIcon } from "./icons";
 
 const TIPS_DISMISSED_KEY = "steam-backlog-tips-dismissed";
 const HLTB_FILTER_KEY = "gamekeeper-hltb-filter";
@@ -19,10 +22,23 @@ interface Props {
   hltbFetching: boolean;
   hltbProgress: { current: number; total: number } | null;
   playtimeMap: Record<string, number>;
+  couchProfiles: Record<string, CouchProfile>;
+  couchFilter: CouchFilter;
+  onCouchFilterChange: (next: CouchFilter) => void;
   onOverrideChange: () => void;
 }
 
-export default function GameGrid({ games, hltbCache, hltbFetching, hltbProgress, playtimeMap, onOverrideChange }: Props) {
+export default function GameGrid({
+  games,
+  hltbCache,
+  hltbFetching,
+  hltbProgress,
+  playtimeMap,
+  couchProfiles,
+  couchFilter,
+  onCouchFilterChange,
+  onOverrideChange,
+}: Props) {
   const [search, setSearch] = useState("");
   const [selectedGame, setSelectedGame] = useState<Classification | null>(null);
   const [showTips, setShowTips] = useState(false);
@@ -69,6 +85,13 @@ export default function GameGrid({ games, hltbCache, hltbFetching, hltbProgress,
     );
   }, [games, search, shortGamesOnly, maxHours, includeUnknown, hltbCache]);
 
+  // Games Steam gave us no categories for can't be judged either way
+  const unknownControllerCount = useMemo(
+    () =>
+      Object.values(couchProfiles).filter((p) => p.controller === "unknown").length,
+    [couchProfiles]
+  );
+
   return (
     <div className="flex flex-col h-full">
       {/* Search bar + HLTB filter */}
@@ -94,7 +117,55 @@ export default function GameGrid({ games, hltbCache, hltbFetching, hltbProgress,
           >
             Short games
           </button>
+          <button
+            onClick={() => onCouchFilterChange({ ...couchFilter, on: !couchFilter.on })}
+            className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+              couchFilter.on
+                ? "bg-steam-blue text-white"
+                : "bg-steam-surface border border-steam-border text-steam-text-dim hover:text-white"
+            }`}
+            aria-label="Couch and TV filter"
+            role="switch"
+            aria-checked={couchFilter.on}
+            title="Gamepad-friendly games you can play from the sofa"
+          >
+            <GamepadIcon />
+            Couch / TV
+          </button>
         </div>
+
+        {/* Couch filter controls (visible when toggle is on) */}
+        {couchFilter.on && (
+          <div className="mt-2 flex flex-wrap items-center gap-4 p-2 rounded-lg bg-steam-bg">
+            <span className="text-xs text-steam-text-dim">
+              {couchFilter.includePartial
+                ? "Full or partial controller support"
+                : "Full controller support"}
+            </span>
+            <label className="flex items-center gap-1.5 text-xs text-steam-text-dim cursor-pointer">
+              <input
+                type="checkbox"
+                checked={couchFilter.includePartial}
+                onChange={(e) =>
+                  onCouchFilterChange({ ...couchFilter, includePartial: e.target.checked })
+                }
+                className="accent-steam-blue"
+              />
+              Include partial support
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-steam-text-dim cursor-pointer">
+              <input
+                type="checkbox"
+                checked={couchFilter.splitScreenOnly}
+                onChange={(e) =>
+                  onCouchFilterChange({ ...couchFilter, splitScreenOnly: e.target.checked })
+                }
+                className="accent-steam-blue"
+              />
+              Split screen only
+            </label>
+          </div>
+        )}
 
         {/* HLTB filter controls (visible when toggle is on) */}
         {shortGamesOnly && (
@@ -141,6 +212,11 @@ export default function GameGrid({ games, hltbCache, hltbFetching, hltbProgress,
 
         <div className="mt-2 flex items-center gap-2 text-xs text-steam-text-dim">
           <span>{sorted.length} game{sorted.length !== 1 ? "s" : ""}</span>
+          {couchFilter.on && unknownControllerCount > 0 && (
+            <span title="Usually delisted or region-locked games — Steam's store API returns nothing for them.">
+              {unknownControllerCount} hidden &mdash; Steam lists no controller data for them.
+            </span>
+          )}
           {hltbFetching && hltbProgress && (
             <span className="text-steam-blue">
               Fetching completion times... {hltbProgress.current}/{hltbProgress.total}
@@ -213,6 +289,7 @@ export default function GameGrid({ games, hltbCache, hltbFetching, hltbProgress,
               key={game.appid}
               game={game}
               hltb={hltbCache[String(game.appid)]}
+              couch={couchProfiles[String(game.appid)]}
               onClick={() => setSelectedGame(game)}
             />
           ))}
@@ -230,6 +307,7 @@ export default function GameGrid({ games, hltbCache, hltbFetching, hltbProgress,
         <GameDetail
           game={selectedGame}
           hltb={hltbCache[String(selectedGame.appid)]}
+          couch={couchProfiles[String(selectedGame.appid)]}
           playtimeHours={playtimeMap[String(selectedGame.appid)] ?? 0}
           onClose={() => setSelectedGame(null)}
           onOverride={async (appid, category) => {
@@ -246,21 +324,46 @@ export default function GameGrid({ games, hltbCache, hltbFetching, hltbProgress,
 function GameCard({
   game,
   hltb,
+  couch,
   onClick,
 }: {
   game: Classification;
   hltb?: HltbEntry;
+  couch?: CouchProfile;
   onClick: () => void;
 }) {
   const [imgError, setImgError] = useState(false);
   const color = CATEGORY_COLORS[game.category];
   const mainHours = hltb?.main_story_hours;
+  const gamepad =
+    couch && !couch.vrOnly && (couch.controller === "full" || couch.controller === "partial")
+      ? couch.controller
+      : null;
 
   return (
     <button
       onClick={onClick}
       className="game-card-hover group relative rounded-lg overflow-hidden bg-steam-surface border border-steam-border hover:border-steam-blue transition-all text-left"
     >
+      {/* Controller support badge */}
+      {gamepad && (
+        <span
+          className={`absolute top-1.5 right-1.5 z-10 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium backdrop-blur-sm ${
+            gamepad === "full"
+              ? "bg-steam-blue/85 text-white"
+              : "bg-black/65 text-steam-text"
+          }`}
+          title={
+            gamepad === "full"
+              ? "Full controller support"
+              : "Partial controller support — may need a keyboard"
+          }
+        >
+          <GamepadIcon size={11} />
+          {gamepad === "partial" && "partial"}
+        </span>
+      )}
+
       {/* Game image */}
       <div className="aspect-[460/215] bg-steam-surface-light">
         {!imgError ? (

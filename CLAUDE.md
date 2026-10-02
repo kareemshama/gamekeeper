@@ -332,6 +332,28 @@ Embedding-based taste engine — offline, zero GPU, zero model download required
 - **Store cache v2**: descriptions/metacritic/devs/release_date kept; versioned wrapper `{version: 2, details}` with legacy fallback; silent background backfill on cold start.
 - Dev sanity tool: `cargo run --example taste_sanity` (runs the whole engine against the real local caches).
 
+## Couch / TV play style (`src/couch.rs`)
+
+Gamepad-friendliness for a TV setup, derived entirely from **store categories already cached** — no new network call, no new cache file, works offline.
+
+- **Source data**: `StoreDetails::categories` (Steam `appdetails` category descriptions). Matching is **exact + case-insensitive**, never substring: "Tracked Controller Support" is a *VR* category and must not read as gamepad support.
+- **Signals**: `Full controller support` / `Partial Controller Support` → `ControllerSupport`; `Shared/Split Screen{,Co-op,PvP}` → split screen; `Remote Play on TV`; `Remote Play Together`; `VR Only` (disqualifies — score forced negative). Empty or missing store entry → `Unknown`, never "no gamepad" (delisted games land here: ~20 of 571 in the dev library).
+- **`qualifies(include_partial)`** is the single definition of "couch pick" and is mirrored in TS as `isCouchReady` in `commands.ts` — change both together.
+- **Command**: `get_couch_profiles` returns a `{ appid: CouchProfile }` map built from current classifications + store cache.
+- **Steam collection**: `write_to_steam` takes `WriteOptions { includeCouch, couchIncludePartial }` and appends **`Controller Friendly`** (excludes `NOT_A_GAME` and VR-only). Writing is **opt-in per write** (defaults on until the user unticks it) — opting out leaves any existing collection untouched rather than emptying it. `write_collection_sets` is the generic writer; `write_collections_to_steam` stays as the four-category wrapper. The command returns a `WriteReport { collections, removed }` so the UI reports what was actually written instead of restating the request.
+- **UI**: sidebar "Play style" toggle (count reflects the current collection filter), the same toggle beside the grid search, controller badge on cards, "Couch & TV" block in `GameDetail`. Filter state lives in `App.tsx` (`CouchFilter`, persisted in `localStorage`) so sidebar and grid can never disagree.
+- Dev sanity tool: `cargo run --example couch_sanity` (breakdown + collection preview from the real caches).
+
+## Steam collection naming (no more `SBO:` prefix)
+
+**Changed:** collections are written under plain names — `Completed`, `In Progress`, `Endless/Multiplayer`, `Not a Game`, `Controller Friendly`. "SBO" was the project's first name (Steam Backlog Organizer) and the prefix existed so the tool never touched hand-made collections. Users ended up with duplicate pairs, so Gamekeeper now **takes over collections with those names**.
+
+- Existing collections with a matching name are **updated in place** (same collection id, Steam's `conflictResolutionMethod` / `strMethodId` fields preserved); their previous contents are replaced. Any other name is never touched.
+- New collections are created with `conflictResolutionMethod: "custom"` + `strMethodId: "union-collections"`, matching what Steam itself stamps on user collections.
+- `LEGACY_COLLECTION_NAMES` (the five `SBO:` names) are **deleted** on the next write, Steam-style: the entry's meta becomes `{key, timestamp, is_deleted: true, version}` with `value` dropped, and the key goes into `cloud-storage-namespace-1.modified.json` so the deletion syncs. A name in both `sets` and `remove` is written, never deleted.
+- **Write modes** (`WriteOptions.mode`): `addNew` (**default**, non-destructive) keeps every current member and files a computed game only when no managed *category* collection already holds it — `merge_add_new` in `lib.rs`, with `claimed` being the union of the four category collections. The couch collection is orthogonal (a game can be In Progress *and* Controller Friendly), so it merges against itself alone. `replace` is the old overwrite and must stay opt-in; `WriteMode::default()` is `AddNew` and a test pins that, since a missing field must never silently mean "discard the user's sorting".
+- The confirm dialog states that same-named collections get replaced — this writer is now destructive to user-named lists by design.
+
 ## Future feature ideas
 
 1. **Delta catalog refresh** — `IStoreService/GetAppList?if_modified_since=` + appdetails/appreviews to update the catalog between releases (Phase 1.5; snapshot-per-release is fine for now).

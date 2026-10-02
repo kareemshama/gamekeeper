@@ -94,6 +94,66 @@ export function getSummary(): Promise<CategorySummary> {
   return invoke("get_summary");
 }
 
+// -- Couch / TV play style --
+
+export type ControllerSupport = "full" | "partial" | "none" | "unknown";
+
+export interface CouchProfile {
+  appid: number;
+  /** Gamepad support as reported by Steam's store categories. */
+  controller: ControllerSupport;
+  /** Streams to a TV via Steam Remote Play / Steam Link. */
+  remotePlayTv: boolean;
+  /** Local multiplayer on one screen. */
+  splitScreen: boolean;
+  remotePlayTogether: boolean;
+  /** VR headset required — never a sofa game. */
+  vrOnly: boolean;
+  /** Full gamepad support and not VR-only: never needs a keyboard. */
+  tvReady: boolean;
+  score: number;
+  /** Short display chips, strongest first. */
+  badges: string[];
+}
+
+/** Couch profiles for every classified game, keyed by app id. Derived from the
+ *  cached store data — offline and instant, no fetch needed. */
+export function getCouchProfiles(): Promise<Record<string, CouchProfile>> {
+  return invoke("get_couch_profiles");
+}
+
+/** Does this game clear the couch bar? Mirrors `CouchProfile::qualifies` in Rust. */
+export function isCouchReady(
+  profile: CouchProfile | undefined,
+  includePartial: boolean
+): boolean {
+  if (!profile || profile.vrOnly) return false;
+  if (profile.controller === "full") return true;
+  return includePartial && profile.controller === "partial";
+}
+
+/** Couch / TV filter state — layers on top of the selected collection. */
+export interface CouchFilter {
+  on: boolean;
+  /** Accept "Partial Controller Support" too, not just full. */
+  includePartial: boolean;
+  /** Only games with local split-screen multiplayer. */
+  splitScreenOnly: boolean;
+}
+
+export const DEFAULT_COUCH_FILTER: CouchFilter = {
+  on: false,
+  includePartial: false,
+  splitScreenOnly: false,
+};
+
+export const CONTROLLER_LABELS: Record<ControllerSupport, string> = {
+  full: "Full controller support",
+  partial: "Partial controller support",
+  none: "Keyboard & mouse",
+  unknown: "Controller support unknown",
+};
+
 // -- Steam Collections --
 
 export interface SteamAccount {
@@ -109,8 +169,31 @@ export function getSteamAccounts(): Promise<SteamAccount[]> {
   return invoke("get_steam_accounts");
 }
 
-export function writeToSteam(accountPath: string): Promise<void> {
-  return invoke("write_to_steam", { accountPath });
+/** How a write treats games already filed in the managed collections. */
+export type WriteMode = "addNew" | "replace";
+
+export interface WriteOptions {
+  /** Also write the "Controller Friendly" collection for a TV / couch setup. */
+  includeCouch: boolean;
+  /** Let partial gamepad support into that collection. */
+  couchIncludePartial: boolean;
+  /** "addNew" never removes a game; "replace" overwrites with Gamekeeper's sorting. */
+  mode: WriteMode;
+}
+
+/** What the write actually put into Steam, straight from the backend. */
+export interface WriteReport {
+  /** `[collection name, game count]` in the order written. */
+  collections: [string, number][];
+  /** Old `SBO:`-prefixed collections deleted during this write. */
+  removed: string[];
+}
+
+export function writeToSteam(
+  accountPath: string,
+  options?: WriteOptions
+): Promise<WriteReport> {
+  return invoke("write_to_steam", { accountPath, options });
 }
 
 // -- AI (bundled llama-server) --

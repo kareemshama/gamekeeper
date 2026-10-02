@@ -5,6 +5,7 @@ pub mod embed;
 pub mod gpu;
 pub mod collections;
 pub mod config;
+pub mod couch;
 pub mod hltb;
 pub mod llm;
 pub mod steam_api;
@@ -15,7 +16,7 @@ use classifier::{Category, Classification};
 use llm::LlmState;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
@@ -242,6 +243,25 @@ fn get_summary(state: State<'_, AppState>) -> Result<CategorySummary, String> {
     Ok(summary)
 }
 
+/// Couch / TV play-style profiles for every classified game, keyed by app id.
+///
+/// Derived from the store details already on disk — instant, offline, and it
+/// needs no extra cache file. Games whose store details were never fetched come
+/// back as `unknown` rather than being omitted.
+#[tauri::command]
+fn get_couch_profiles(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, couch::CouchProfile>, String> {
+    // Never hold both locks at once — `classify_games` takes them in the
+    // opposite order, and two commands can run on different threads.
+    let appids: Vec<u64> = {
+        let classifications = state.classifications.lock().map_err(|e| e.to_string())?;
+        classifications.iter().map(|c| c.appid).collect()
+    };
+    let store_cache = state.store_cache.lock().map_err(|e| e.to_string())?;
+    Ok(couch::build_profiles(&appids, &store_cache))
+}
+
 #[tauri::command]
 fn check_steam_running() -> bool {
     collections::is_steam_running()
@@ -252,35 +272,187 @@ fn get_steam_accounts() -> Vec<collections::SteamAccount> {
     collections::get_steam_accounts()
 }
 
+/// How a write treats games already filed in the managed collections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum WriteMode {
+    /// Never remove anything. A game is filed only when it isn't already in one
+    /// of the four category collections, so hand-sorting survives untouched.
+    #[default]
+    AddNew,
+    /// Each managed collection's contents become exactly what Gamekeeper
+    /// computed. Discards any manual sorting in those collections.
+    Replace,
+}
+
+/// Options for a Write to Steam run.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteOptions {
+    /// Also write the "Controller Friendly" collection for a TV / couch setup.
+    #[serde(default)]
+    include_couch: bool,
+    /// Let partial gamepad support into that collection.
+    #[serde(default)]
+    couch_include_partial: bool,
+    /// Defaults to the non-destructive mode when the frontend omits it.
+    #[serde(default)]
+    mode: WriteMode,
+}
+
+/// Merge computed membership into what Steam already holds.
+///
+/// `existing` is the collection's current members, kept in order and never
+/// dropped. A computed id joins it only when `claimed` doesn't already hold it —
+/// `claimed` being every game filed across the managed category collections, so
+/// a game the user sorted by hand is never duplicated into a second collection.
+fn merge_add_new(existing: &[u64], computed: &[u64], claimed: &HashSet<u64>) -> Vec<u64> {
+    let mut out = existing.to_vec();
+    let mut seen: HashSet<u64> = existing.iter().copied().collect();
+    for id in computed {
+        if claimed.contains(id) || seen.contains(id) {
+            continue;
+        }
+        seen.insert(*id);
+        out.push(*id);
+    }
+    out
+}
+
+/// What a write actually put into Steam — reported back so the UI can state
+/// facts instead of repeating what it asked for.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteReport {
+    /// `(collection name, game count)` in the order written.
+    collections: Vec<(String, usize)>,
+    /// Old `SBO:`-prefixed collections deleted during this write.
+    removed: Vec<String>,
+}
+
 #[tauri::command]
 fn write_to_steam(
     state: State<'_, AppState>,
     account_path: String,
-) -> Result<(), String> {
+    options: Option<WriteOptions>,
+) -> Result<WriteReport, String> {
     // Check if Steam is running
     if collections::is_steam_running() {
         return Err("Steam is currently running. Please close Steam before writing collections.".into());
     }
 
+    let options = options.unwrap_or_default();
+
     // Load existing cloud data
     let userdata_path = std::path::PathBuf::from(&account_path);
     let (mut cloud_data, cloud_path) = collections::load_steam_collections(&userdata_path)?;
 
-    // Build categories from current classifications
-    let classifications = state.classifications.lock().map_err(|e| e.to_string())?;
-    let mut categories: HashMap<String, Vec<u64>> = HashMap::new();
-    categories.insert("COMPLETED".into(), Vec::new());
-    categories.insert("IN_PROGRESS".into(), Vec::new());
-    categories.insert("ENDLESS".into(), Vec::new());
-    categories.insert("NOT_A_GAME".into(), Vec::new());
+    // Build categories from current classifications. Snapshot the (appid,
+    // category) pairs and release the lock before touching the store cache —
+    // `classify_games` locks these two in the opposite order.
+    let games: Vec<(u64, Category)> = {
+        let classifications = state.classifications.lock().map_err(|e| e.to_string())?;
+        classifications
+            .iter()
+            .map(|c| (c.appid, c.category.clone()))
+            .collect()
+    };
 
-    for c in classifications.iter() {
-        let cat_key = c.category.to_string();
-        categories.entry(cat_key).or_default().push(c.appid);
+    let mut categories: HashMap<String, Vec<u64>> = HashMap::new();
+    for key in collections::CATEGORY_ORDER {
+        categories.insert(key.to_string(), Vec::new());
     }
 
-    // Write
-    collections::write_collections_to_steam(&mut cloud_data, &cloud_path, &categories)
+    for (appid, category) in &games {
+        categories
+            .entry(category.to_string())
+            .or_default()
+            .push(*appid);
+    }
+
+    let coll_names = collections::collection_names();
+    let mut sets: Vec<(String, Vec<u64>)> = collections::CATEGORY_ORDER
+        .iter()
+        .map(|key| {
+            (
+                coll_names[key].to_string(),
+                categories.get(*key).cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    if options.include_couch {
+        let store_cache = state.store_cache.lock().map_err(|e| e.to_string())?;
+        let couch_ids: Vec<u64> = games
+            .iter()
+            // Soundtracks, tools and demos are noise on a TV.
+            .filter(|(_, category)| *category != Category::NotAGame)
+            .filter(|(appid, _)| {
+                couch::profile_for(*appid, store_cache.get(&appid.to_string()))
+                    .qualifies(options.couch_include_partial)
+            })
+            .map(|(appid, _)| *appid)
+            .collect();
+        sets.push((collections::COUCH_COLLECTION_NAME.to_string(), couch_ids));
+    }
+
+    // "Add new games only": keep every current member, and file a computed game
+    // only when no managed category collection already holds it. The couch
+    // collection is a play style, orthogonal to the four categories, so it is
+    // merged against itself alone — a game can be both In Progress and
+    // Controller Friendly.
+    if options.mode == WriteMode::AddNew {
+        let members = collections::existing_collection_members(&cloud_data);
+        let category_names: HashSet<&str> = collections::CATEGORY_ORDER
+            .iter()
+            .map(|key| coll_names[key])
+            .collect();
+        let claimed: HashSet<u64> = category_names
+            .iter()
+            .filter_map(|name| members.get(*name))
+            .flatten()
+            .copied()
+            .collect();
+
+        for (name, computed) in sets.iter_mut() {
+            let existing = members.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
+            *computed = if category_names.contains(name.as_str()) {
+                merge_add_new(existing, computed, &claimed)
+            } else {
+                merge_add_new(existing, computed, &HashSet::new())
+            };
+        }
+    }
+
+    eprintln!(
+        "[collections] mode {:?}, writing {} collections (include_couch = {}): {}",
+        options.mode,
+        sets.len(),
+        options.include_couch,
+        sets.iter()
+            .map(|(name, ids)| format!("{name} ({})", ids.len()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Write, clearing the old SBO:-prefixed collections in the same pass
+    let removed = collections::write_collection_sets(
+        &mut cloud_data,
+        &cloud_path,
+        &sets,
+        &collections::LEGACY_COLLECTION_NAMES,
+    )?;
+    if !removed.is_empty() {
+        eprintln!("[collections] removed legacy collections: {}", removed.join(", "));
+    }
+
+    Ok(WriteReport {
+        collections: sets
+            .into_iter()
+            .map(|(name, ids)| (name, ids.len()))
+            .collect(),
+        removed,
+    })
 }
 
 // -- AI / LLM commands (bundled llama-server) --
@@ -1809,6 +1981,7 @@ pub fn run() {
             remove_override,
             get_overrides,
             get_summary,
+            get_couch_profiles,
             check_steam_running,
             get_steam_accounts,
             write_to_steam,
@@ -1852,4 +2025,75 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the JS → Rust contract for the Write to Steam options. The frontend
+    /// sends camelCase keys; a rename drift here would silently turn the couch
+    /// collection opt-in into a no-op.
+    #[test]
+    fn write_options_deserialize_from_frontend_payload() {
+        let opts: WriteOptions = serde_json::from_str(
+            r#"{"includeCouch": true, "couchIncludePartial": true}"#,
+        )
+        .expect("frontend payload must deserialize");
+        assert!(opts.include_couch);
+        assert!(opts.couch_include_partial);
+
+        let off: WriteOptions =
+            serde_json::from_str(r#"{"includeCouch": false, "couchIncludePartial": false}"#)
+                .unwrap();
+        assert!(!off.include_couch);
+
+        // Absent fields default to off rather than failing the whole command.
+        let empty: WriteOptions = serde_json::from_str("{}").unwrap();
+        assert!(!empty.include_couch);
+        assert!(!empty.couch_include_partial);
+    }
+
+    /// The destructive mode must never be what you get by accident.
+    #[test]
+    fn write_mode_defaults_to_add_new() {
+        let empty: WriteOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.mode, WriteMode::AddNew);
+
+        let explicit: WriteOptions =
+            serde_json::from_str(r#"{"mode": "replace"}"#).unwrap();
+        assert_eq!(explicit.mode, WriteMode::Replace);
+
+        let add: WriteOptions = serde_json::from_str(r#"{"mode": "addNew"}"#).unwrap();
+        assert_eq!(add.mode, WriteMode::AddNew);
+    }
+
+    #[test]
+    fn add_new_keeps_existing_and_appends_unfiled_games() {
+        // The user sorted 1, 2, 3 by hand; the rules also want 4 and 5.
+        let claimed: HashSet<u64> = [1, 2, 3, 9].into_iter().collect();
+        let merged = merge_add_new(&[1, 2, 3], &[3, 4, 5], &claimed);
+        assert_eq!(merged, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn add_new_never_files_a_game_another_collection_already_holds() {
+        // 9 lives in a different managed collection — leave it where it is.
+        let claimed: HashSet<u64> = [9].into_iter().collect();
+        let merged = merge_add_new(&[1], &[9, 10], &claimed);
+        assert_eq!(merged, vec![1, 10]);
+    }
+
+    #[test]
+    fn add_new_is_order_stable_and_deduplicates() {
+        let merged = merge_add_new(&[5, 1], &[1, 1, 7], &HashSet::new());
+        assert_eq!(merged, vec![5, 1, 7]);
+    }
+
+    #[test]
+    fn add_new_on_an_empty_library_is_just_the_computed_set() {
+        // First-ever write: nothing exists, so both modes agree.
+        let merged = merge_add_new(&[], &[4, 2], &HashSet::new());
+        assert_eq!(merged, vec![4, 2]);
+    }
 }

@@ -48,6 +48,7 @@ Collections sync across machines via Steam Cloud. No manual sorting required.
 - Automatic classification with 14 priority rules
 - Manual overrides when you disagree (overrides always win)
 - Results persist between runs. Only new games get re-classified
+- **Couch / TV filter** — narrow the library to gamepad-friendly games, optionally split-screen only, and write them to Steam as their own collection for Big Picture mode
 
 **Discover** *(new in v4.0 — works fully offline, no AI model needed)*
 - **Taste Engine** — learns what you actually like from your playtime, completions, and habits
